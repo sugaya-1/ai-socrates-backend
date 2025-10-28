@@ -17,9 +17,10 @@ class DatabaseSeeder extends Seeder
     {
         // User::factory(10)->create();
 
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
+        $this->call([
+            TopicSeeder::class,    // 1. トピック (親) を先に入れる
+            QuestionSeeder::class, // 2. 問題 (子) を次に入れる
+            ChoiceSeeder::class,   // 3. 選択肢 (孫) を最後に入れる
         ]);
     }
 }
