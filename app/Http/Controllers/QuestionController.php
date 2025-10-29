@@ -1,49 +1,156 @@
-<?php // ① PHPコードの始まり
+<?php namespace App\Http\Controllers;
 
-namespace App\Http\Controllers; // ② このファイルの「住所」
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use App\Models\Question; // Questionモデルを使用
+// ★★★ 追加: Interaction モデルを使用 ★★★
+use App\Models\Interaction;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
-use App\Http\Controllers\Controller; // ③ 使う道具：基本的なコントローラー機能
-use Illuminate\Http\Request;       // ④ 使う道具：リクエスト情報 (今回は使わないけどお作法)
-use App\Models\Question;           // ⑤ 使う道具：「Question担当者」(モデル)
-use App\Models\Topic;              // ⑥ 使う道具：「Topic担当者」(モデル)
-
-// ⑦ 「QuestionController」という名前の「注文受付係」を作りますよ
-//    基本的な受付係(Controller)の能力を引き継ぎますよ
 class QuestionController extends Controller
 {
-    // ⑧ 「getNextQuestion」という名前の「具体的な仕事（注文処理の手順）」を定義しますよ
-    //    お客さんがURLで指定したトピック番号($topicId)を、この手順の中で使いますよ
-    public function getNextQuestion(string $topicId)
+    /**
+     * 次の問題を取得するAPIエンドポイント (現在はID=1の問題を固定で返す)
+     * @param int $topicId - (将来的に利用)
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function getNextQuestion($topicId)
     {
-        // --- ここから仕事の手順 ---
+        $question = Question::find(1);
 
-        // ⑨ まず、お客さんが言った番号($topicId)の「トピック」が、
-        //    本当に「商品リスト（データベース）」に存在するか確認しなさい。
-        //    「トピック担当者(Topic::)」に頼んで、「findOrFail（探して、無かったら『品切れです(404)』って言ってね）」しなさい。
-        //    見つかったトピックは、$topic という「伝票」にメモしておきなさい。
-        $topic = Topic::findOrFail($topicId);
+        if ($question) {
+            $question->load('choices');
+        } else {
+            return response()->json(['message' => 'Question with ID 1 not found.'], 404);
+        }
 
-        // ⑩ 次に、さっきメモしたトピック伝票($topic)に書かれている情報を使って、
-        //    そのトピックに属する「問題」を探しなさい。
-        //    トピック担当者が知っている連携機能(->questions())を使うんだ。
-        //    問題を探すとき、それについている「選択肢」も一緒に(->with('choices'))探すように厨房に指示してね（二度手間にならないように）。
-        //    問題がもし複数見つかっても、とりあえず最初の1つだけ(->first())でいいよ。
-        //    見つかった問題を $question という「次の伝票」にメモしなさい（見つからなかったら伝票は空っぽ(null)のまま）。
-        $question = $topic->questions()->with('choices')->first();
+        return response()->json([
+            'id' => $question->id,
+            'question_text' => $question->question_text,
+            'question_type' => $question->question_type,
+            'choices' => $question->choices
+        ]);
+    }
 
-        // ⑪ 問題の伝票($question)が空っぽじゃないか確認しなさい。
-        //    もし空っぽだったら(! $question)...
-        if (!$question) {
-            // ⑫ お客さんに「すみません、そのトピックの問題はありませんでした(404)」と
-            //    JSON形式で丁重にお断りしなさい(return)。これでこの仕事は終わり。
-            return response()->json(['message' => 'No questions found for this topic.'], 404);
-        } // 確認終わり
+    /**
+     * ユーザーの回答を受け取り、Gemini APIでAI解説を生成し、会話履歴を保存して返す
+     * @param Request $request
+     * @param int $questionId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function checkAnswer(Request $request, $questionId)
+    {
+        $userAnswerText = $request->input('answer_text');
+        $question = Question::with('choices')->find($questionId);
 
-        // ⑬ (もし問題が見つかっていたら)
-        //    問題の伝票($question)に書かれている情報（問題文や選択肢リスト）を、
-        //    お客さんが読みやすいJSON形式にきれいに整えて、
-        //    「お待たせしました(200 OK)」という状態でお渡ししなさい(return)。これでこの仕事は終わり。
-        return response()->json($question);
+        if (!$question || !$userAnswerText) {
+            return response()->json(['message' => 'Invalid request or Question not found.'], $question ? 400 : 404);
+        }
 
-    } // ⑧ getNextQuestion 仕事の終わりの合図
-} // ⑦ QuestionController クラス定義の終わりの合図
+        // --- データベースの正解情報と連携 ---
+        $correctChoice = $question->choices->firstWhere('is_correct', true);
+        $correctAnswerText = $correctChoice ? $correctChoice->choice_text : '（正解情報なし）';
+        $lowerText = strtolower($userAnswerText);
+        $isCorrect = false;
+
+        if ($correctChoice) {
+            $correctKeywords = [
+                strtolower(trim(str_replace(')', '', $correctAnswerText))),
+                strtolower(trim(substr($correctAnswerText, 0, 1)))
+            ];
+            // 例: 正解に'CPU'が含まれる場合の追加キーワード
+            if (stripos($correctAnswerText, 'CPU') !== false) {
+                $correctKeywords[] = 'cpu';
+            }
+
+            foreach ($correctKeywords as $keyword) {
+                if ($keyword && str_contains($lowerText, $keyword)) {
+                    $isCorrect = true;
+                    break;
+                }
+            }
+        }
+
+        // --- Gemini API 呼び出し用のプロンプト生成 ---
+        $apiKey = env('GEMINI_API_KEY', ''); // ★★★ APIキーを設定 ★★★
+        $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=" . $apiKey;
+
+        $prompt = "あなたは「AIソクラテス」という名前の親切なAIチューターです。\n";
+
+        if ($isCorrect) {
+            $prompt .= "学習者の回答は「正解」と判定されました。\n";
+            $prompt .= "素晴らしいと褒めた上で、なぜそれが正解なのか、学習者の理解をさらに深めるような追加の質問（例：「CPUが『脳』と呼ばれる理由を説明できますか？」）を、短く（2〜3文程度）親しみやすい日本語で生成してください。\n";
+        } else {
+            $prompt .= "学習者の回答は「不正解」と判定されました。\n";
+            $prompt .= "頭ごなしに否定せず、まずは学習者の回答を受け止めてください。\n";
+            $prompt .= "その上で、「正解」にたどり着けるように、ソクラテスのように対話を促すヒントや質問（例：「惜しいですね！『A』と考えた理由をもう少し詳しく教えていただけますか？」）を、短く（2〜3文程度）親しみやすい日本語で生成してください。\n";
+        }
+
+        $explanation = "AIとの対話でエラーが発生しました。";
+
+        try {
+            // Gemini API呼び出しとペイロードの補完
+            $response = Http::timeout(30)->post($apiUrl, [
+                'contents' => [
+                    [
+                        'parts' => [
+                            [
+                                'text' => $prompt . "現在の質問: " . $question->question_text . "\n正解: " . $correctAnswerText . "\n学習者の回答: " . $userAnswerText
+                            ]
+                        ]
+                    ]
+                ],
+                // システムインストラクションでAIのペルソナと応答形式を固定
+                'systemInstruction' => [
+                    'parts' => [
+                        [
+                            'text' => "あなたは「AIソクラテス」という名前の親切なAIチューターです。学習者を鼓舞し、対話を通して理解を深めることを目的としています。出力は常に短く、フレンドリーな日本語で、指示された追加の質問やヒントのみを返すようにしてください。会話の他の部分は含めないでください。"
+                        ]
+                    ]
+                ]
+            ]);
+
+            if ($response->successful()) {
+                $generatedText = $response->json('candidates.0.content.parts.0.text');
+                $explanation = $generatedText ?: "AI応答取得エラー(テキストなし)";
+            } else {
+                Log::error('Gemini API request failed.', [
+                    'status' => $response->status(),
+                    'response' => $response->body()
+                ]);
+                $explanation = "AI通信エラー (HTTP Status: " . $response->status() . ")";
+            }
+        } catch (\Exception $e) {
+            Log::error('Gemini API connection error.', [
+                'error' => $e->getMessage()
+            ]);
+            $explanation = "AI接続エラー";
+        }
+
+        // --- ★★★ ステップ10: 会話履歴の保存処理 ★★★ ---
+        try {
+            Interaction::create([
+                'question_id' => $questionId,
+                'user_answer' => $userAnswerText,
+                'ai_response' => $explanation, // Gemini APIの応答を保存
+                'is_correct' => $isCorrect, // 判定結果を保存
+                // 'user_id' => auth()->id(), // ログイン機能実装後
+            ]);
+        } catch (\Exception $e) {
+            // 保存失敗時のエラーログ（処理は続行）
+            Log::error('Failed to save interaction.', [
+                'question_id' => $questionId,
+                'error' => $e->getMessage()
+            ]);
+        }
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+
+        return response()->json([
+            'question_id' => $questionId,
+            'user_answer' => $userAnswerText,
+            'is_correct' => $isCorrect,
+            'explanation' => $explanation,
+        ]);
+    }
+}
