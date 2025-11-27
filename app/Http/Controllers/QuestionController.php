@@ -2,49 +2,53 @@
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
-use App\Models\Question; // Questionモデルを使用
-// ★★★ 追加: Interaction モデルを使用 ★★★
+use App\Models\Question;
 use App\Models\Interaction;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-
-use pp\Services\GeminiService;
+use App\Services\GeminiService;
 
 class QuestionController extends Controller
 {
     /**
-     * 次の問題を取得するAPIエンドポイント (トピックIDに基づいてランダムに問題を選択する)
-     * @param int $topicId - 取得する問題が属するトピックのID
-     * @return \Illuminate\Http\JsonResponse
+     * 指定されたIDの問題を取得する
+     * * URLパラメータの $id を topic_id ではなく、
+     * questionsテーブルの主キー(id)として扱って検索します。
      */
-    public function getNextQuestion($topicId)
+    public function getNextQuestion($id)
     {
-        $question = Question::where('topic_id', $topicId)
-                            ->inRandomOrder() // ランダムに1つ選択
-                            ->first();
+        // topic_id ではなく id で直接問題を検索
+        $question = Question::find($id);
 
         if (!$question) {
-            return response()->json(['message' => "Topic ID {$topicId} に関連する問題が見つかりません。"], 404);
+            return response()->json(['message' => "ID {$id} の問題が見つかりません。"], 404);
         }
 
-        // 選択肢データをロード
+        // 新しい挑戦のために、この問題に関する過去の会話履歴をリセット（削除）する
+        Interaction::where('question_id', $question->id)->delete();
+
         $question->load('choices');
+
+        // 次のID（現在のIDより大きい最小のID）を取得して、フロントエンドに教える
+        // これにより、IDが連番でなくても（例: 1, 3, 5...）次の問題に進めるようになります
+        $nextId = Question::where('id', '>', $question->id)->min('id');
 
         return response()->json([
             'id' => $question->id,
             'question_text' => $question->question_text,
             'question_type' => $question->question_type,
-            'choices' => $question->choices
+            'choices' => $question->choices,
+            // フロントエンド側で「次の問題ID」として使用するために返却
+            // (フロントエンド側の変数名 next_topic_id に合わせていますが実態は next_question_id です)
+            'next_topic_id' => $nextId
         ]);
     }
 
     /**
-     * 特定の質問IDに関連する会話履歴を取得する (★ 新規追加)
+     * 会話履歴を取得する
      */
     public function getHistory(int $questionId)
     {
         try {
-            // question_idに紐づく全ての履歴を、古い順に取得
             $history = Interaction::where('question_id', $questionId)
                 ->orderBy('created_at', 'asc')
                 ->get([
@@ -67,13 +71,9 @@ class QuestionController extends Controller
 
 
     /**
-     * ユーザーの回答を受け取り、Gemini APIでAI解説を生成し、会話履歴を保存して返す
-     * (★ 修正: 会話履歴をGeminiに渡すロジックを強化)
-     * @param Request $request
-     * @param int $questionId
-     * @return \Illuminate\Http\JsonResponse
+     * ユーザーの回答を受け取り、GeminiServiceに処理を委譲する
      */
-    public function checkAnswer(Request $request, $questionId)
+    public function checkAnswer(Request $request, $questionId, GeminiService $geminiService)
     {
         $userAnswerText = $request->input('answer_text');
         $question = Question::with('choices')->find($questionId);
@@ -82,47 +82,17 @@ class QuestionController extends Controller
             return response()->json(['message' => 'Invalid request or Question not found.'], $question ? 400 : 404);
         }
 
-        // --- 1. 過去の会話履歴の取得と整形 (★ 修正ここから ★) ---
-        // 同じ質問IDに紐づく過去のInteractionを全て取得
+        // 1. 過去の会話履歴の取得
         $pastInteractions = Interaction::where('question_id', $questionId)
             ->orderBy('created_at', 'asc')
             ->get();
 
-        // Geminiのcontents形式に合わせるための会話履歴の構築
-        // Geminiは直近の会話履歴を元に応答を生成するため、これを適切に構成する
-        $chatHistory = [
-            // 質問文を最初のパートとして追加
-            // role: user にすることで、AIに質問内容を認識させる
-            ['role' => 'user', 'parts' => [['text' => '最初の質問: ' . $question->question_text]]],
-        ];
-
-        // 過去の対話履歴をチャット形式で追加 (User/Modelのロールを交互に設定)
-        foreach ($pastInteractions as $interaction) {
-            // 過去のユーザー回答
-            $chatHistory[] = [
-                'role' => 'user',
-                'parts' => [['text' => '私の前の回答: ' . $interaction->user_answer]]
-            ];
-            // 過去のAI応答
-            $chatHistory[] = [
-                'role' => 'model',
-                'parts' => [['text' => $interaction->ai_response]] // AIの応答はそのまま渡す
-            ];
-        }
-
-        // ユーザーの最新の回答を追加
-        $chatHistory[] = ['role' => 'user', 'parts' => [['text' => '最新の私の回答: ' . $userAnswerText]]];
-        // --- 1. 過去の会話履歴の取得と整形 (★ 修正ここまで ★) ---
-
-
-        // --- 2. 最初の正誤判定 (初回回答時のみの処理として継続) ---
-        // このロジックは会話の履歴の有無に関わらず実行し、結果を保存する
+        // 2. 最初の正誤判定
         $correctChoice = $question->choices->firstWhere('is_correct', true);
         $correctAnswerText = $correctChoice ? $correctChoice->choice_text : '（正解情報なし）';
         $lowerText = strtolower($userAnswerText);
         $isCorrect = false;
 
-        // ※ 判定ロジックは現状維持
         if ($correctChoice) {
             $correctKeywords = [
                 strtolower(trim(str_replace(')', '', $correctAnswerText))),
@@ -140,78 +110,23 @@ class QuestionController extends Controller
             }
         }
 
-        // --- 3. Gemini API 呼び出し用のプロンプト生成 ---
-        $apiKey = env('GEMINI_API_KEY', '');
-        $apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=" . $apiKey;
+        // 3. Gemini API 呼び出しと履歴保存のロジックをサービスに委譲
+        $result = $geminiService->generateAndSaveResponse(
+            $question->id,
+            $question->question_text,
+            $userAnswerText,
+            $correctAnswerText,
+            $isCorrect,
+            $pastInteractions
+        );
 
-        // プロンプトは、会話の状況（初回判定後か、対話中か）によってAIの役割を変える
-        $latestInteractionCount = $pastInteractions->count();
-        $isInitialCheck = ($latestInteractionCount === 0);
-
-        // システムインストラクションの内容を、会話のステージによって調整する
-        if ($isInitialCheck) {
-            // 初回回答の時: 正誤判定結果を明確に伝え、深掘り質問を返す
-            $systemInstructionText = "あなたは「AIソクラテス」という名前のAIチューターです。学習者を鼓舞し、対話を通して理解を深めることを目的としています。学習者の回答の正誤判定（正解は「{$correctAnswerText}」）を伝え、その上で学習者の理解をさらに深める**追加の質問**を、短く（3文程度まで）親しみやすい日本語で生成してください。";
-        } else {
-            // 2回目以降の対話中: 会話履歴を考慮して、最新のユーザー回答に対するフィードバックと次の質問を返す
-            $systemInstructionText = "あなたは「AIソクラテス」という名前のAIチューターです。これまでの会話履歴を考慮し、学習者の最新の回答（「最新の私の回答」）に対する建設的なフィードバックと、**対話を継続するための次の質問**を、短く（3文程度まで）親しみやすい日本語で生成してください。";
-        }
-
-        $explanation = "AIとの対話でエラーが発生しました。";
-
-        try {
-            // Gemini API呼び出し
-            $response = Http::timeout(30)->post($apiUrl, [
-                'contents' => $chatHistory, // ★★★ 会話履歴をGeminiに送信 ★★★
-                'systemInstruction' => [
-                    'parts' => [
-                        [
-                            'text' => $systemInstructionText
-                        ]
-                    ]
-                ],
-                'generationConfig' => [
-                    'temperature' => 0.7 // 対話的な応答のため
-                ]
-            ]);
-
-            if ($response->successful()) {
-                $generatedText = $response->json('candidates.0.content.parts.0.text');
-                $explanation = $generatedText ?: "AI応答取得エラー(テキストなし)";
-            } else {
-                Log::error('Gemini API request failed.', [
-                    'status' => $response->status(),
-                    'response' => $response->body()
-                ]);
-                $explanation = "AI通信エラー (HTTP Status: " . $response->status() . ")";
-            }
-        } catch (\Exception $e) {
-            Log::error('Gemini API connection error.', [
-                'error' => $e->getMessage()
-            ]);
-            $explanation = "AI接続エラー";
-        }
-
-        // --- 会話履歴の保存処理 ---
-        try {
-            Interaction::create([
-                'question_id' => $questionId,
-                'user_answer' => $userAnswerText,
-                'ai_response' => $explanation, // Gemini APIの応答を保存
-                'is_correct' => $isCorrect, // 判定結果を保存
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Failed to save interaction.', [
-                'question_id' => $questionId,
-                'error' => $e->getMessage()
-            ]);
-        }
-
+        // 4. 結果をJSONで返す
         return response()->json([
             'question_id' => $questionId,
             'user_answer' => $userAnswerText,
-            'is_correct' => $isCorrect,
-            'explanation' => $explanation,
+            'is_correct' => $result['is_correct'],
+            'explanation' => $result['explanation'],
+            'is_sufficient' => $result['is_sufficient'],
         ]);
     }
 }
