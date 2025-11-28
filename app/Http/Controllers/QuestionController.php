@@ -1,4 +1,6 @@
-<?php namespace App\Http\Controllers;
+<?php
+
+namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
@@ -11,25 +13,20 @@ class QuestionController extends Controller
 {
     /**
      * 指定されたIDの問題を取得する
-     * * URLパラメータの $id を topic_id ではなく、
-     * questionsテーブルの主キー(id)として扱って検索します。
      */
     public function getNextQuestion($id)
     {
-        // topic_id ではなく id で直接問題を検索
         $question = Question::find($id);
 
         if (!$question) {
             return response()->json(['message' => "ID {$id} の問題が見つかりません。"], 404);
         }
 
-        // 新しい挑戦のために、この問題に関する過去の会話履歴をリセット（削除）する
+        // 新しい挑戦のために、この問題に関する過去の会話履歴をリセット
         Interaction::where('question_id', $question->id)->delete();
 
         $question->load('choices');
 
-        // 次のID（現在のIDより大きい最小のID）を取得して、フロントエンドに教える
-        // これにより、IDが連番でなくても（例: 1, 3, 5...）次の問題に進めるようになります
         $nextId = Question::where('id', '>', $question->id)->min('id');
 
         return response()->json([
@@ -37,8 +34,6 @@ class QuestionController extends Controller
             'question_text' => $question->question_text,
             'question_type' => $question->question_type,
             'choices' => $question->choices,
-            // フロントエンド側で「次の問題ID」として使用するために返却
-            // (フロントエンド側の変数名 next_topic_id に合わせていますが実態は next_question_id です)
             'next_topic_id' => $nextId
         ]);
     }
@@ -69,7 +64,6 @@ class QuestionController extends Controller
         }
     }
 
-
     /**
      * ユーザーの回答を受け取り、GeminiServiceに処理を委譲する
      */
@@ -98,6 +92,7 @@ class QuestionController extends Controller
                 strtolower(trim(str_replace(')', '', $correctAnswerText))),
                 strtolower(trim(substr($correctAnswerText, 0, 1)))
             ];
+            // CPUなどの特殊ケース対応
             if (stripos($correctAnswerText, 'CPU') !== false) {
                 $correctKeywords[] = 'cpu';
             }
@@ -110,14 +105,15 @@ class QuestionController extends Controller
             }
         }
 
-        // 3. Gemini API 呼び出しと履歴保存のロジックをサービスに委譲
+        // 3. Gemini API 呼び出し (★修正: 選択肢を第7引数として渡す)
         $result = $geminiService->generateAndSaveResponse(
             $question->id,
             $question->question_text,
             $userAnswerText,
             $correctAnswerText,
             $isCorrect,
-            $pastInteractions
+            $pastInteractions,
+            $question->choices // ← ここを追加！
         );
 
         // 4. 結果をJSONで返す
