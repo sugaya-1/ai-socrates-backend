@@ -13,6 +13,7 @@ class QuestionController extends Controller
 {
     /**
      * 指定されたIDの問題を取得する
+     *
      */
     public function getNextQuestion($id)
     {

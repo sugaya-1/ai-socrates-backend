@@ -141,6 +141,7 @@ class GeminiService
             Log::error('Failed to save interaction.', ['question_id' => $questionId, 'error' => $e->getMessage()]);
         }
 
+
         return [
             'explanation' => $explanation,
             'is_correct' => $isCorrect,
