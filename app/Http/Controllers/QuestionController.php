@@ -1,46 +1,44 @@
-<?php
-
-namespace App\Http\Controllers;
+<?php namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Question;
 use App\Models\Interaction;
 use Illuminate\Support\Facades\Log;
+// ★修正: サービスの正しい読み込み（正しいパスを使用）
 use App\Services\GeminiService;
 
 class QuestionController extends Controller
 {
     /**
-     * 指定されたIDの問題を取得する
-     *
+     * 次の問題を取得するAPIエンドポイント
+     * 問題IDが変わるタイミングで、その問題の古い履歴をリセットします。
      */
-    public function getNextQuestion($id)
+    public function getNextQuestion($topicId)
     {
-        $question = Question::find($id);
+        $question = Question::where('topic_id', $topicId)
+                            ->inRandomOrder()
+                            ->first();
 
         if (!$question) {
-            return response()->json(['message' => "ID {$id} の問題が見つかりません。"], 404);
+            return response()->json(['message' => "Topic ID {$topicId} に関連する問題が見つかりません。"], 404);
         }
 
-        // 新しい挑戦のために、この問題に関する過去の会話履歴をリセット
+        // ★重要: 新しい挑戦のために、この問題に関する過去の会話履歴をリセット（削除）する
         Interaction::where('question_id', $question->id)->delete();
 
         $question->load('choices');
-
-        $nextId = Question::where('id', '>', $question->id)->min('id');
 
         return response()->json([
             'id' => $question->id,
             'question_text' => $question->question_text,
             'question_type' => $question->question_type,
-            'choices' => $question->choices,
-            'next_topic_id' => $nextId
+            'choices' => $question->choices
         ]);
     }
 
     /**
-     * 会話履歴を取得する
+     * 会話履歴を取得する (変更なし)
      */
     public function getHistory(int $questionId)
     {
@@ -64,6 +62,7 @@ class QuestionController extends Controller
             return response()->json(['error' => '履歴の取得に失敗しました。'], 500);
         }
     }
+
 
     /**
      * ユーザーの回答を受け取り、GeminiServiceに処理を委譲する
@@ -93,7 +92,6 @@ class QuestionController extends Controller
                 strtolower(trim(str_replace(')', '', $correctAnswerText))),
                 strtolower(trim(substr($correctAnswerText, 0, 1)))
             ];
-            // CPUなどの特殊ケース対応
             if (stripos($correctAnswerText, 'CPU') !== false) {
                 $correctKeywords[] = 'cpu';
             }
@@ -106,18 +104,19 @@ class QuestionController extends Controller
             }
         }
 
-        // 3. Gemini API 呼び出し (★修正: 選択肢を第7引数として渡す)
+        // 3. Gemini API 呼び出しと履歴保存のロジックをサービスに委譲
+        // ★修正: サービス呼び出しに置き換え、ロジックをサービスに移譲
         $result = $geminiService->generateAndSaveResponse(
             $question->id,
             $question->question_text,
             $userAnswerText,
             $correctAnswerText,
             $isCorrect,
-            $pastInteractions,
-            $question->choices // ← ここを追加！
+            $pastInteractions
         );
 
         // 4. 結果をJSONで返す
+        // ★修正: is_sufficient フラグを含めて返す
         return response()->json([
             'question_id' => $questionId,
             'user_answer' => $userAnswerText,
