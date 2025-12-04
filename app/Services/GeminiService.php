@@ -146,6 +146,7 @@ class GeminiService
             $explanation = str_replace('[FINAL]', '', $explanation);
         }
 
+
         try {
             Interaction::create([
                 'question_id' => $questionId,
