@@ -10,7 +10,6 @@ use Illuminate\Support\Facades\Log;
 class GeminiService
 {
     private string $apiUrl;
-    // ★修正: 最新の安定モデルを指定
     private string $model = 'gemini-flash-latest';
 
     public function __construct()
@@ -23,23 +22,21 @@ class GeminiService
      * AIの応答を生成し、Interaction履歴をデータベースに保存する
      */
     public function generateAndSaveResponse(
+        ?int $userId, // ★ここに「?」を追加してください
         int $questionId,
         string $questionText,
         string $userAnswerText,
         string $correctAnswerText,
         bool $isCorrect,
         Collection $pastInteractions,
-        $choices = null // ★追加: 選択肢を受け取る
+        $choices = null
     ): array
     {
-        // ★追加: 選択肢リストをテキスト化してプロンプトに埋め込めるようにする
+        // 選択肢リストをテキスト化
         $choicesText = "";
         if ($choices) {
             foreach ($choices as $choice) {
-                // choice_text カラムが存在すると仮定（カラム名が違う場合は調整してください）
                 $text = $choice->choice_text ?? $choice->text ?? '';
-                // もし choice_label (A, B...) があれば使う、なければ自動付与などはDB設計による
-                // ここでは単純にテキストを列挙します
                 $choicesText .= "- {$text}\n";
             }
         }
@@ -49,14 +46,14 @@ class GeminiService
         foreach ($pastInteractions as $interaction) {
             $chatHistory[] = ['role' => 'user', 'parts' => [['text' => '私の前の回答: ' . $interaction->user_answer]]];
 
-            // ★修正: 履歴に含まれるバックスラッシュを除去してAPIエラーを防ぐ
+            // 履歴に含まれるバックスラッシュを除去してAPIエラーを防ぐ
             $cleanAiResponse = str_replace(['\\'], '', $interaction->ai_response);
             $chatHistory[] = ['role' => 'model', 'parts' => [['text' => $cleanAiResponse]]];
         }
 
         $chatHistory[] = ['role' => 'user', 'parts' => [['text' => '最新の私の回答: ' . $userAnswerText]]];
 
- // --- プロンプト構築（完全修正版） ---
+        // プロンプト構築
         $baseInstruction = "あなたは「AIソクラテス」です。古代ギリシャの哲学者のような知的さと、AIらしい親しみやすさを兼ね備えた口調で話してください。
 
                             【現在の問題】
@@ -82,7 +79,7 @@ class GeminiService
         $isInitialCheck = ($pastInteractions->count() === 0);
 
         if ($isInitialCheck) {
-            // --- 初回フェーズ ---
+            // 初回フェーズ
             $taskInstruction = "
             【状況】これは学習者の『最初の回答』です。
 
@@ -90,7 +87,7 @@ class GeminiService
             1. まず、ユーザーの回答が正解か不正解かを、ハッキリと伝えてください。
             2. その後、選んだ選択肢について「なぜそれを選んだのか？」や「その用語の役割は何か？」といった、思考を促す短い質問を投げかけてください。";
         } else {
-            // --- 深掘りフェーズ（ここを強化！） ---
+            // 深掘りフェーズ
             $taskInstruction = "
             【状況】これは対話の続き（深掘りフェーズ）です。
             学習者はすでに選択肢を選び終え、その理由や定義について説明しようとしています。
@@ -109,7 +106,7 @@ class GeminiService
 
         $explanation = "AIとの対話でエラーが発生しました.";
 
-        // --- Gemini API 呼び出し ---
+        // Gemini API 呼び出し
         try {
             $response = Http::timeout(60)->post($this->apiUrl, [
                 'contents' => $chatHistory,
@@ -124,9 +121,6 @@ class GeminiService
             if ($response->successful()) {
                 $generatedText = $response->json('candidates.0.content.parts.0.text');
                 $explanation = $generatedText ?: "AI応答取得エラー";
-
-                // ★修正: AIの応答から不要な記号（バックスラッシュなど）を削除
-                // これで画面上の表示崩れを防ぎます
                 $explanation = str_replace(['\\'], '', $explanation);
 
             } else {
@@ -138,17 +132,16 @@ class GeminiService
             $explanation = "AI接続エラー";
         }
 
-        // --- 終了判定と保存 ---
-
+        // 終了判定と保存
         $isSufficient = false;
         if (str_contains($explanation, '[FINAL]')) {
             $isSufficient = true;
             $explanation = str_replace('[FINAL]', '', $explanation);
         }
 
-
         try {
             Interaction::create([
+                'user_id' => $userId, // ここでユーザーIDを保存
                 'question_id' => $questionId,
                 'user_answer' => $userAnswerText,
                 'ai_response' => $explanation,
@@ -157,7 +150,6 @@ class GeminiService
         } catch (\Exception $e) {
             Log::error('Failed to save interaction.', ['question_id' => $questionId, 'error' => $e->getMessage()]);
         }
-
 
         return [
             'explanation' => $explanation,
