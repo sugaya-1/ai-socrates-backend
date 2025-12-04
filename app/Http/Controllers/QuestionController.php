@@ -117,6 +117,7 @@ class QuestionController extends Controller
             }
         }
 
+
         // 3. Gemini API 呼び出し
         // ユーザーIDを第1引数として渡す
         $result = $geminiService->generateAndSaveResponse(

@@ -12,6 +12,7 @@ class GeminiService
     private string $apiUrl;
     private string $model = 'gemini-flash-latest';
 
+
     public function __construct()
     {
         $apiKey = env('GEMINI_API_KEY', '');
