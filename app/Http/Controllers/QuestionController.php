@@ -45,7 +45,11 @@ class QuestionController extends Controller
     public function getHistory(int $questionId)
     {
         try {
+            $userId = Auth::id(); // ユーザーID取得
+
+            // 自分の履歴だけを取得
             $history = Interaction::where('question_id', $questionId)
+                ->where('user_id', $userId)
                 ->orderBy('created_at', 'asc')
                 ->get([
                     'id',
@@ -70,6 +74,7 @@ class QuestionController extends Controller
      */
     public function checkAnswer(Request $request, $questionId, GeminiService $geminiService)
     {
+        $userId = Auth::id(); // ユーザーID取得
         $userAnswerText = $request->input('answer_text');
         $question = Question::with('choices')->find($questionId);
 
@@ -77,8 +82,9 @@ class QuestionController extends Controller
             return response()->json(['message' => 'Invalid request or Question not found.'], $question ? 400 : 404);
         }
 
-        // 1. 過去の会話履歴の取得
+        // 1. 過去の会話履歴の取得（自分の履歴のみ）
         $pastInteractions = Interaction::where('question_id', $questionId)
+            ->where('user_id', $userId)
             ->orderBy('created_at', 'asc')
             ->get();
 
@@ -108,6 +114,7 @@ class QuestionController extends Controller
 
         // 3. Gemini API 呼び出し (★修正: 選択肢を第7引数として渡す)
         $result = $geminiService->generateAndSaveResponse(
+            $userId,
             $question->id,
             $question->question_text,
             $userAnswerText,

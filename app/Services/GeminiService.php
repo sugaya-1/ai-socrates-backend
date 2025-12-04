@@ -10,7 +10,6 @@ use Illuminate\Support\Facades\Log;
 class GeminiService
 {
     private string $apiUrl;
-    // ★修正: 最新の安定モデルを指定
     private string $model = 'gemini-flash-latest';
 
     public function __construct()
@@ -23,23 +22,21 @@ class GeminiService
      * AIの応答を生成し、Interaction履歴をデータベースに保存する
      */
     public function generateAndSaveResponse(
+        ?int $userId, // ★ここに「?」を追加してください
         int $questionId,
         string $questionText,
         string $userAnswerText,
         string $correctAnswerText,
         bool $isCorrect,
         Collection $pastInteractions,
-        $choices = null // ★追加: 選択肢を受け取る
+        $choices = null
     ): array
     {
-        // ★追加: 選択肢リストをテキスト化してプロンプトに埋め込めるようにする
+        // 選択肢リストをテキスト化
         $choicesText = "";
         if ($choices) {
             foreach ($choices as $choice) {
-                // choice_text カラムが存在すると仮定（カラム名が違う場合は調整してください）
                 $text = $choice->choice_text ?? $choice->text ?? '';
-                // もし choice_label (A, B...) があれば使う、なければ自動付与などはDB設計による
-                // ここでは単純にテキストを列挙します
                 $choicesText .= "- {$text}\n";
             }
         }
@@ -49,7 +46,7 @@ class GeminiService
         foreach ($pastInteractions as $interaction) {
             $chatHistory[] = ['role' => 'user', 'parts' => [['text' => '私の前の回答: ' . $interaction->user_answer]]];
 
-            // ★修正: 履歴に含まれるバックスラッシュを除去してAPIエラーを防ぐ
+            // 履歴に含まれるバックスラッシュを除去してAPIエラーを防ぐ
             $cleanAiResponse = str_replace(['\\'], '', $interaction->ai_response);
             $chatHistory[] = ['role' => 'model', 'parts' => [['text' => $cleanAiResponse]]];
         }
@@ -93,7 +90,7 @@ class GeminiService
 
         $explanation = "AIとの対話でエラーが発生しました.";
 
-        // --- Gemini API 呼び出し ---
+        // Gemini API 呼び出し
         try {
             $response = Http::timeout(60)->post($this->apiUrl, [
                 'contents' => $chatHistory,
@@ -108,9 +105,6 @@ class GeminiService
             if ($response->successful()) {
                 $generatedText = $response->json('candidates.0.content.parts.0.text');
                 $explanation = $generatedText ?: "AI応答取得エラー";
-
-                // ★修正: AIの応答から不要な記号（バックスラッシュなど）を削除
-                // これで画面上の表示崩れを防ぎます
                 $explanation = str_replace(['\\'], '', $explanation);
 
             } else {
@@ -122,8 +116,7 @@ class GeminiService
             $explanation = "AI接続エラー";
         }
 
-        // --- 終了判定と保存 ---
-
+        // 終了判定と保存
         $isSufficient = false;
         if (str_contains($explanation, '[FINAL]')) {
             $isSufficient = true;
@@ -132,6 +125,7 @@ class GeminiService
 
         try {
             Interaction::create([
+                'user_id' => $userId, // ここでユーザーIDを保存
                 'question_id' => $questionId,
                 'user_answer' => $userAnswerText,
                 'ai_response' => $explanation,
@@ -140,7 +134,6 @@ class GeminiService
         } catch (\Exception $e) {
             Log::error('Failed to save interaction.', ['question_id' => $questionId, 'error' => $e->getMessage()]);
         }
-
 
         return [
             'explanation' => $explanation,
