@@ -140,4 +140,5 @@ class QuestionController extends Controller
             'is_sufficient' => $result['is_sufficient'],
         ]);
     }
+
 }
