@@ -13,7 +13,6 @@ return new class extends Migration
     {
         Schema::create('interactions', function (Blueprint $table) {
             $table->id(); // 自動採番のID
-
             $table->foreignId('question_id')->constrained()->onDelete('cascade'); // どの質問に対するやり取りか (外部キー)
             $table->text('user_answer');        // ユーザーが入力したテキスト回答
             $table->text('ai_response');        // AI(Gemini)が生成した応答テキスト
